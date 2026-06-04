@@ -1,5 +1,5 @@
 # Stage 1: Build Stage
-FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04 AS builder
+FROM nvidia/cuda:12.6.0-runtime-ubuntu22.04 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common \
@@ -28,7 +28,7 @@ RUN uv venv .venv && \
     uv sync --frozen --no-install-project
 
 # Stage 2: Production Stage
-FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04 AS runner
+FROM nvidia/cuda:12.6.0-runtime-ubuntu22.04 AS runner
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common \
