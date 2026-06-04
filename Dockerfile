@@ -12,8 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the uv binary from the official image
-COPY --from=astral-sh/uv:latest /uv /uvx /bin/
+COPY --from=astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 WORKDIR /app
 
