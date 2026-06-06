@@ -37,7 +37,7 @@ def add(x: torch.Tensor, y: torch.Tensor):
 
     return output
 
-def main():
+if __name__ == "__main__":
     torch.manual_seed(0)
     size = 98432
     print("Device", DEVICE)
