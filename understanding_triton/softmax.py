@@ -4,6 +4,24 @@ import triton
 import triton.language as tl
 from triton.runtime import driver
 
+
+"""
+The device I will be running on is rtx 4090. These are some of the specs:
+
+1. Warp size = 32
+2. Block = Max 1024 threads or 32 warps
+3. No of SM = 128
+4. Theoritically 16 blocks can run in 1 SM simultaneously. But usually, this is not achieved since different warps utilize
+   different no of registers, shared memory, etc, which limits the no of blocks that can run in 1 SM simultaneously.
+5. No of registers = 65536
+6. 1 SM can run at max 32 blocks
+7. 16384 cuda cores, 128 per SM
+8. 512 tensor cores, 4 per SM
+9. 1 SM has 128kb of SRAM memory, but 100kb is given to programmers. Acts like a L1 cache, and is unique to each SM
+10. 72MB of L2 cache, this is a global cache across all SM's
+"""
+
+
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 def naive_softmax(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
@@ -42,10 +60,19 @@ def softmax_kernel(x_ptr, out_ptr, n_rows, row_stride, BLOCK_SIZE: tl.constexpr,
         out_ptrs = output_row_start_ptr + col_offsets
         tl.store(out_ptrs, softmax_output, mask=mask)
 
+# {'max_shared_mem': 101376, 'max_num_regs': 65536, 'multiprocessor_count': 128, 'warpSize': 32, 'sm_clock_rate': 2520000, 'mem_clock_rate': 10501000, 'mem_bus_width': 384}
 properties = driver.active.utils.get_device_properties(DEVICE.index)
+
+# 128
 NUM_SM = properties["multiprocessor_count"]
+
+# 65536
 NUM_REGS = properties["max_num_regs"]
+
+# 101376 bytes ~ 100kb
 SIZE_SMEM = properties["max_shared_mem"]
+
+# 32
 WARP_SIZE = properties["warpSize"]
 
 def softmax(x):
@@ -61,7 +88,7 @@ def softmax(x):
 
     # pre-compile kernel to get register usage and compute thread occupancy
     kernel = softmax_kernel.warmup(y, x, x.stride(0), y.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE,
-                                   num_warps=num_warps, grid=(1, ))
+                                   num_warps=num_warps, grid=(1,))
     kernel._init_handles()
     # this specifies how many registers are used by 1 thread
     # for this example, i get 37
