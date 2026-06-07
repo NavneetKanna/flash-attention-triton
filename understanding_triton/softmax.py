@@ -32,15 +32,15 @@ def naive_softmax(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
     return exp_x / sum_exp_x
 
 @triton.jit
-def softmax_kernel(x_ptr, out_ptr, n_rows, row_stride, BLOCK_SIZE: tl.constexpr, n_cols):
+def softmax_kernel(x_ptr, out_ptr, n_rows, n_cols, row_stride, BLOCK_SIZE: tl.constexpr):
     row_start = tl.program_id(0)
-    row_offset = tl.num_programs(0) # 768
+    row_step = tl.num_programs(0) # 768
 
     # there are 768 programs launched
     # row_start will be 0..768
     # and we loop in grid stride loop, for example,
     # assuming we are row 5, the loop indicies will be 5, 5+768 < 1873, 5+768+768 < 1873 
-    for row_idx in tl.range(row_start, n_rows, row_offset):
+    for row_idx in tl.range(row_start, n_rows, row_step):
         row_start_ptr = x_ptr + row_idx*row_stride
         col_offsets = tl.arange(0, BLOCK_SIZE)
         x_ptrs = row_start_ptr + col_offsets
@@ -87,7 +87,7 @@ def softmax(x):
     y = torch.empty_like(x)
 
     # pre-compile kernel to get register usage and compute thread occupancy
-    kernel = softmax_kernel.warmup(y, x, x.stride(0), y.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE,
+    kernel = softmax_kernel.warmup(x, y, n_rows, n_cols, x.stride(0), BLOCK_SIZE=BLOCK_SIZE,
                                    num_warps=num_warps, grid=(1,))
     kernel._init_handles()
     # this specifies how many registers are used by 1 thread
