@@ -111,7 +111,7 @@ def softmax(x):
     num_programs = NUM_SM * occupancy
     num_programs = min(num_programs, n_rows)
 
-    kernel[(num_programs, 1, 1)](y, x, x.stride(0), y.stride(0), n_rows, n_cols, BLOCK_SIZE)
+    kernel[(num_programs, 1, 1)](x, y, n_rows, n_cols, x.stride(0), BLOCK_SIZE)
     return y
 
 if __name__ == "__main__":
