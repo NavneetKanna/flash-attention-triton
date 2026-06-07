@@ -42,7 +42,56 @@ def softmax_kernel(x_ptr, out_ptr, n_rows, row_stride, BLOCK_SIZE: tl.constexpr,
         out_ptrs = output_row_start_ptr + col_offsets
         tl.store(out_ptrs, softmax_output, mask=mask)
 
+properties = driver.active.utils.get_device_properties(DEVICE.index)
+NUM_SM = properties["multiprocessor_count"]
+NUM_REGS = properties["max_num_regs"]
+SIZE_SMEM = properties["max_shared_mem"]
+WARP_SIZE = properties["warpSize"]
 
+def softmax(x):
+    n_rows, n_cols = x.shape
 
+    BLOCK_SIZE = triton.next_power_of_2(n_cols)
+
+    # by specifying this, we set threads_per_block
+    # 8*32 = 256 threads per block
+    num_warps = 8
+
+    y = torch.empty_like(x)
+
+    # pre-compile kernel to get register usage and compute thread occupancy
+    kernel = softmax_kernel.warmup(y, x, x.stride(0), y.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE,
+                                   num_warps=num_warps, grid=(1, ))
+    kernel._init_handles()
+    # this specifies how many registers are used by 1 thread
+    # for this example, i get 37
+    n_regs = kernel.n_regs
+    # this tells us how much sram in bytes is used by 1 block
+    # for this example, i get 4kb
+    size_smem = kernel.metadata.shared
+
+    # the denominator gives us how many registers are used by 1 block
+    # for this example, it gives 6
+    occupancy = NUM_REGS // (n_regs * WARP_SIZE * num_warps)
+
+    # we choose the min between how many registers 1 blocks uses
+    # vs sram it uses
+    # for this example, it is min(6, 24)
+    occupancy = min(occupancy, SIZE_SMEM // size_smem)
+
+    # this gives us the number of blocks that can run across
+    # all sm's
+    num_programs = NUM_SM * occupancy
+    num_programs = min(num_programs, n_rows)
+
+    kernel[(num_programs, 1, 1)](y, x, x.stride(0), y.stride(0), n_rows, n_cols, BLOCK_SIZE)
+    return y
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    x = torch.randn(1823, 781, device=DEVICE)
+    y_triton = softmax(x)
+    y_torch = torch.softmax(x, axis=1)
+    assert torch.allclose(y_triton, y_torch), (y_triton, y_torch)
 
 
