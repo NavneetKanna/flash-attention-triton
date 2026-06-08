@@ -1,6 +1,14 @@
-def main():
-    print("Hello from flash-attention-triton!")
+import torch
+
+import triton
+import triton.language as tl
+from triton.runtime import driver
 
 
-if __name__ == "__main__":
-    main()
+DEVICE = triton.runtime.driver.active.get_active_torch_device()
+
+@triton.jit
+def self_attn_fwd():
+    pass
+
+
