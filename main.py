@@ -20,23 +20,8 @@ def self_attn_fwd(
     BLOCK_KV,
     BLOCK_D,
     scale,
+    B, H, N, D
 ):
-    """
-    For example, let:
-
-    - Q, K, V = (2, 4, 512, 64)
-    - Q_BLOCK_SHAPE_ROW = 128
-    - Q_BLOCK_SHAPE_COL = 64
-    - Grid = (512/128, 2*4) = (4, 8)
-     - 4 blocks along the sequence (N) dimension
-     - 8 blocks for (batch x head) combinations
-     - This grid launches 32 threadblocks that run this kernel
-       independently
-    - output shape is (B, H, N, D)
-    """
-
-    B, H, N, D = Q.shape
-
     block_row = tl.program_id(0)
     batch_head_idx = tl.program_id(1)
 
@@ -71,58 +56,33 @@ def self_attn_fwd(
         order=(1, 0) # row major
     )
 
+    # variables for online softmax
+    # these need to be 1D since we process in batch 
+    # they apply across the rows of the block
+    mi = tl.zeros([BLOCK_Q]) - float('inf') # running max
+    li = tl.zeros([BLOCK_Q])                # running denominator 
+    o_acc = tl.zeros([BLOCK_Q, BLOCK_D])   # running output accumulator
+
+    q_ptr = tl.load(q_block_ptr, boundary_check=(0, 1))
+
     for start_kv in range(0, N, BLOCK_KV):
-        q_ptr = tl.load(q_block_ptr, boundary_check=(0, 1))
         k_ptr = tl.load(k_block_ptr, boundary_check=(0, 1))
         v_ptr = tl.load(v_block_ptr, boundary_check=(0, 1))
 
         # Step 1: Q @ K.T
-        acc = tl.zeros(BLOCK_Q, BLOCK_KV)
-        # result gets added to acc
-        tl.dot(q_ptr, k_ptr, acc=acc)
+        qk = tl.dot(q_ptr, k_ptr) * scale
 
-    # # We need not specify mask since triton takes care of it
-    # # when we use block ptr, but we can pass boundry check
-    # # which specifies the dims we want to check for illegal access
-    # q_block = tl.load(q_block_ptr, boundary_check=(0, 1))
-    # k_block = tl.load(k_block_ptr, boundary_check=(0, 1))
-    # v_block = tl.load(v_block_ptr, boundary_check=(0, 1))
+        # Step 2: Online softmax
+        new_mi = tl.maximum(mi, tl.max(qk, axis=1)) # 1d
+        alpha = tl.math.exp2(mi - new_mi) # 1d
+        p = tl.math.exp2(qk - new_mi[:, None]) # 2d
 
-    # # With the blocks loaded, we can do all the steps for attn
-    # # in one go without storing the itermediate results back to VRAM
+        # Step 3: Matmul with V
+        o_acc = o_acc * alpha[:, None] + 
 
-    # # Step 1: transpose the last two dims of K
-    # tl.trans(k_block, (0, 1, 3, 2))
-
-    # #  Step 2: Q @ K.T
-    # # Here I am using K_BLOCK_SHAPE_ROW instead of K_BLOCK_SHAPE_COL
-    # # since K is now transposed
-    # acc = tl.zeros(Q_BLOCK_SHAPE_ROW, K_BLOCK_SHAPE_ROW)
-    # acc = tl.dot(q_block, k_block, acc)
-
-    # # Step 3: Scale
-    # acc = acc * scale
-
-    # # Step 4: Online softmax
-    # mi = float('-inf') # running max
-    # li = 0.0           # running denominator
-    # o_acc = 0.0        # running output acc
-
-    # # Compute local max of block
-    # m = tl.max(acc)
-    # # Update global max
-    # new_mi = tl.maximum(mi, m)
-    # # Compute correction factor
-    # alpha = tl.math.exp2(mi - new_mi)
-    # # Compute local sum
-    # local_sum = tl.sum(tl.math.exp2(acc - new_mi))
-    # # Update the running denominator
-    # new_li = li * alpha + local_sum
-    # # Update output
-    # o_acc = o_acc * alpha
-
-    # # Step 5: Multiple with V
-    # o_acc = o_acc + tl.sum(tl.math.exp2(mi - new_mi) * V)
+        # Step 4: Update global running variables
+        mi = new_mi
+        li = li * alpha + tl.sum(p, axis=1) # 1d
 
 
 """
