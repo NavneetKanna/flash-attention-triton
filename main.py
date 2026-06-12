@@ -71,51 +71,58 @@ def self_attn_fwd(
         order=(1, 0) # row major
     )
 
-    # We need not specify mask since triton takes care of it
-    # when we use block ptr, but we can pass boundry check
-    # which specifies the dims we want to check for illegal access
-    q_block = tl.load(q_block_ptr, boundary_check=(0, 1))
-    k_block = tl.load(k_block_ptr, boundary_check=(0, 1))
-    v_block = tl.load(v_block_ptr, boundary_check=(0, 1))
+    for start_kv in range(0, N, BLOCK_KV):
+        q_ptr = tl.load(q_block_ptr, boundary_check=(0, 1))
+        k_ptr = tl.load(k_block_ptr, boundary_check=(0, 1))
+        v_ptr = tl.load(v_block_ptr, boundary_check=(0, 1))
 
-    # With the blocks loaded, we can do all the steps for attn
-    # in one go without storing the itermediate results back to VRAM
+        # Step 1: Q @ K.T
+        acc = tl.zeros(BLOCK_Q, BLOCK_KV)
+        # result gets added to acc
+        tl.dot(q_ptr, k_ptr, acc=acc)
 
-    # Step 1: transpose the last two dims of K
-    tl.trans(k_block, (0, 1, 3, 2))
+    # # We need not specify mask since triton takes care of it
+    # # when we use block ptr, but we can pass boundry check
+    # # which specifies the dims we want to check for illegal access
+    # q_block = tl.load(q_block_ptr, boundary_check=(0, 1))
+    # k_block = tl.load(k_block_ptr, boundary_check=(0, 1))
+    # v_block = tl.load(v_block_ptr, boundary_check=(0, 1))
 
-    #  Step 2: Q @ K.T
-    # Here I am using K_BLOCK_SHAPE_ROW instead of K_BLOCK_SHAPE_COL
-    # since K is now transposed
-    acc = tl.zeros(Q_BLOCK_SHAPE_ROW, K_BLOCK_SHAPE_ROW)
-    acc = tl.dot(q_block, k_block, acc)
+    # # With the blocks loaded, we can do all the steps for attn
+    # # in one go without storing the itermediate results back to VRAM
 
-    # Step 3: Scale
-    acc = acc * scale
+    # # Step 1: transpose the last two dims of K
+    # tl.trans(k_block, (0, 1, 3, 2))
 
-    # Step 4: Online softmax
-    mi = float('-inf') # running max
-    li = 0.0           # running denominator
-    o_acc = 0.0        # running output acc
+    # #  Step 2: Q @ K.T
+    # # Here I am using K_BLOCK_SHAPE_ROW instead of K_BLOCK_SHAPE_COL
+    # # since K is now transposed
+    # acc = tl.zeros(Q_BLOCK_SHAPE_ROW, K_BLOCK_SHAPE_ROW)
+    # acc = tl.dot(q_block, k_block, acc)
 
-    # Compute local max of block
-    m = tl.max(acc)
-    # Update global max
-    new_mi = tl.maximum(mi, m)
-    # Compute correction factor
-    alpha = tl.math.exp2(mi - new_mi)
-    # Compute local sum
-    local_sum = tl.sum(tl.math.exp2(acc - new_mi))
-    # Update the running denominator
-    new_li = li * alpha + local_sum
-    # Update output
-    o_acc = o_acc * alpha
+    # # Step 3: Scale
+    # acc = acc * scale
 
-    # Step 5: Multiple with V
-    o_acc = o_acc + tl.sum(tl.math.exp2(mi - new_mi) * V)
+    # # Step 4: Online softmax
+    # mi = float('-inf') # running max
+    # li = 0.0           # running denominator
+    # o_acc = 0.0        # running output acc
 
+    # # Compute local max of block
+    # m = tl.max(acc)
+    # # Update global max
+    # new_mi = tl.maximum(mi, m)
+    # # Compute correction factor
+    # alpha = tl.math.exp2(mi - new_mi)
+    # # Compute local sum
+    # local_sum = tl.sum(tl.math.exp2(acc - new_mi))
+    # # Update the running denominator
+    # new_li = li * alpha + local_sum
+    # # Update output
+    # o_acc = o_acc * alpha
 
-
+    # # Step 5: Multiple with V
+    # o_acc = o_acc + tl.sum(tl.math.exp2(mi - new_mi) * V)
 
 
 """
@@ -175,7 +182,7 @@ So the grid is
 
 So now lets see what happens inside block 0 when we execute the kernel
 
-block_row = 1
+block_row = 0
 batch_head_idx = 0
 
 offset = 0 * 32 = 0
