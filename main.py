@@ -78,7 +78,7 @@ def self_attn_fwd(
         p = tl.math.exp2(qk - new_mi[:, None]) # 2d
 
         # Step 3: Matmul with V
-        o_acc = o_acc * alpha[:, None] + 
+        o_acc = o_acc * alpha[:, None] + tl.dot(p, v_ptr)
 
         # Step 4: Update global running variables
         mi = new_mi
