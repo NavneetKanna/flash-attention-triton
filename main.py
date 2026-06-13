@@ -9,10 +9,11 @@ DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 @triton.jit
 def self_attn_fwd(
-    Q, K, V, # (B, H, N, D)
+    Q, K, V, O, # (B, H, N, D)
     stride_q_b, stride_q_h, stride_q_n, stride_q_d,
     stride_k_b, stride_k_h, stride_k_n, stride_k_d,
     stride_v_b, stride_v_h, stride_v_n, stride_v_d,
+    stride_o_b, stride_o_h, stride_o_n, stride_o_d,
     scale,
     B, H, N, D,
     BLOCK_Q: tl.constexpr,
@@ -62,12 +63,22 @@ def self_attn_fwd(
 
     q_ptr = tl.load(q_block_ptr, boundary_check=(0, 1))
 
+    q_idx = block_row * BLOCK_Q + tl.arange(0, BLOCK_Q)
+
+    qk_scale = scale * 1.44269504089
+
     for start_kv in range(0, N, BLOCK_KV):
         k_ptr = tl.load(k_block_ptr, boundary_check=(0, 1))
         v_ptr = tl.load(v_block_ptr, boundary_check=(0, 1))
 
         # Q @ K.T
-        qk = tl.dot(q_ptr, k_ptr) * scale
+        qk = tl.dot(q_ptr, k_ptr) * qk_scale
+
+        # Causal
+        k_idx = start_kv + tl.arange(0, BLOCK_KV)
+        # For all the query indicies >= key indicies, keep the value, others mask it out 
+        # so basically, mask out the upper triangle and keep the lower triangle
+        qk = tl.where(q_idx[:, None] >= k_idx[:, None], qk, float('-inf'))
 
         # Online softmax
         new_mi = tl.maximum(mi, tl.max(qk, axis=1)) # 1d
@@ -84,6 +95,16 @@ def self_attn_fwd(
         v_block_ptr = tl.advance(v_block_ptr, (BLOCK_KV, 0))
 
     o_acc = o_acc / li[:, None]
+
+    o_block_ptr = tl.make_block_ptr(
+        base=O+offset,
+        shape=(N, BLOCK_D),
+        strides=(stride_o_n, stride_o_d),
+        offsets=(block_row*BLOCK_Q, 0),
+        block_shape=(BLOCK_Q, BLOCK_D),
+        order=(1, 0) # row major
+    )
+    tl.store(o_block_ptr, o_acc, boundary_check=(0, 1))
 
 """
 
