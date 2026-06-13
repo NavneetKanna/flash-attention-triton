@@ -69,21 +69,24 @@ def self_attn_fwd(
         k_ptr = tl.load(k_block_ptr, boundary_check=(0, 1))
         v_ptr = tl.load(v_block_ptr, boundary_check=(0, 1))
 
-        # Step 1: Q @ K.T
+        # Q @ K.T
         qk = tl.dot(q_ptr, k_ptr) * scale
 
-        # Step 2: Online softmax
+        # Online softmax
         new_mi = tl.maximum(mi, tl.max(qk, axis=1)) # 1d
         alpha = tl.math.exp2(mi - new_mi) # 1d
         p = tl.math.exp2(qk - new_mi[:, None]) # 2d
 
-        # Step 3: Matmul with V
+        # Matmul with V
         o_acc = o_acc * alpha[:, None] + tl.dot(p, v_ptr)
 
-        # Step 4: Update global running variables
         mi = new_mi
         li = li * alpha + tl.sum(p, axis=1) # 1d
 
+        k_ptr = tl.advance(k_ptr, (0, BLOCK_KV))
+        v_ptr = tl.advance(v_ptr, (BLOCK_KV, 0))
+
+    o_acc = o_acc / li[:, None]
 
 """
 
@@ -163,6 +166,44 @@ block id, because if you observe we have launched the grid by dividing 8/4, so w
 This tells triton in the tensor starting at (0, 0, 0, 0) which has shape (8, 4) start the pointer at postion (0, 0) and this block has shape
 (4, 4). Similarly, block 4 would have base=(0, 0, 0, 0), shape=(8, 4), offsets as (4, 0), etc.
 
-So, we load a block from Q to SRAM. Similarly, we load a block from K and V, but we do it inside a strided loop (Block_K). Unlike Q, the offsets
+To visualize for the Q matrix:
+
+Block 0 would load: base = (0, 0, 0, 0); shape = (8, 4); offsets = (0, 0); block_shape = (4, 4)
+    [0.3581, 0.1616, 0.5714, 0.4795]
+    [0.5468, 0.3008, 0.9154, 0.3457]
+    [0.4201, 0.1406, 0.2273, 0.5269]
+    [0.1441, 0.1024, 0.8580, 0.8310]
+
+Block 1 would load: base = (0, 0, 8, 4); shape = (8, 4); offsets = (0, 0); block_shape = (4, 4)
+    [0.7147, 0.2785, 0.6463, 0.7070]
+    [0.0046, 0.2647, 0.3889, 0.6876]
+    [0.3702, 0.3406, 0.5874, 0.0967]
+    [0.2227, 0.3751, 0.3261, 0.0857]
+
+Block 4 would load: base = (0, 0, 0, 0); shape = (8, 4); offsets = (4, 0); block_shape = (4, 4)
+    [0.7828, 0.5347, 0.0038, 0.2535]
+    [0.3112, 0.3961, 0.2596, 0.3704]
+    [0.7789, 0.6267, 0.0297, 0.9068]
+    [0.9708, 0.1654, 0.0144, 0.4128]
+
+etc
+
+So, we load a block from Q to SRAM. Similarly, we load a block from K and V, but we do it inside a strided loop (Block_KV). Unlike Q, the offsets
 arg will be 0 since we will be streaming through them in the loop.
+
+So to summarize:
+
+- BLOCK_Q = 4, BLOCK_D = 4
+- stride_q_h = 32
+- Q, K, V has shape (2, 2, 8, 4) where 2 is bs, 2 is no of heads, 8 is seq len, 4 is head dim
+- Grid is launched as (N/BLOCK_Q, 2*2) = (2, 4)
+- For each block in the grid we load these blocks for each matrix:
+ - block_row = tl.program_id(0)
+ - batch_head_idx = tl.program_id(1)
+ - offset = batch_head_idx * stride_q_h
+ - Q_block:
+    - base is Q+offset
+    - shape is (N, BLOCK_D) = (8, 4)
+    - offsets is (block_row*BLOCK_Q, 0)
+    - block_shape is (BLOCK_Q, BLOCK_D) = (4, 4)
 """
