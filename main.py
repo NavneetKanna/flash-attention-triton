@@ -106,6 +106,42 @@ def self_attn_fwd(
     )
     tl.store(o_block_ptr, o_acc, boundary_check=(0, 1))
 
+def flash_attention(q, k, v):
+    B, H, N, D = q.shape
+    assert q.shape == k.shape == v.shape
+
+    BLOCK_Q = 64
+    BLOCK_KV = 64
+    assert N % BLOCK_Q == 0, "N must be divisible by BLOCK_Q for this version"
+    assert N % BLOCK_KV == 0, "N must be divisible by BLOCK_KV for this version"
+
+    o = torch.empty_like(q)
+    scale = 1.0 / (D ** 0.5)
+    grid = (N // BLOCK_Q, B * H)
+
+    self_attn_fwd[grid](
+        q, k, v, o,
+        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+        o.stride(0), o.stride(1), o.stride(2), o.stride(3),
+        scale, B, H, N, D,
+        BLOCK_Q=BLOCK_Q, BLOCK_KV=BLOCK_KV, BLOCK_D=D
+    )
+    return o
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    B, H, N, D = 2, 4, 256, 64
+    q = torch.randn(B, H, N, D, device="cuda", dtype=torch.float32)
+    k = torch.randn(B, H, N, D, device="cuda", dtype=torch.float32)
+    v = torch.randn(B, H, N, D, device="cuda", dtype=torch.float32)
+
+    out = flash_attention(q, k, v)
+    ref = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+    torch.testing.assert_close(out, ref, atol=1e-2, rtol=0)
+    print(f"passed  (max diff {(out - ref).abs().max().item():.2e})")
+
 """
 
 Let's understand using an example:
