@@ -10,17 +10,14 @@ DEVICE = triton.runtime.driver.active.get_active_torch_device()
 @triton.jit
 def self_attn_fwd(
     Q, K, V, # (B, H, N, D)
-    q_shape,
-    k_shape,
-    v_shape,
     stride_q_b, stride_q_h, stride_q_n, stride_q_d,
     stride_k_b, stride_k_h, stride_k_n, stride_k_d,
     stride_v_b, stride_v_h, stride_v_n, stride_v_d,
-    BLOCK_Q,
-    BLOCK_KV,
-    BLOCK_D,
     scale,
-    B, H, N, D
+    B, H, N, D,
+    BLOCK_Q: tl.constexpr,
+    BLOCK_KV: tl.constexpr,
+    BLOCK_D: tl.constexpr,
 ):
     block_row = tl.program_id(0)
     batch_head_idx = tl.program_id(1)
@@ -59,9 +56,9 @@ def self_attn_fwd(
     # variables for online softmax
     # these need to be 1D since we process in batch 
     # they apply across the rows of the block
-    mi = tl.zeros([BLOCK_Q]) - float('inf') # running max
-    li = tl.zeros([BLOCK_Q])                # running denominator 
-    o_acc = tl.zeros([BLOCK_Q, BLOCK_D])   # running output accumulator
+    mi = tl.zeros([BLOCK_Q], dtype=tl.float32) - float('inf') # running max
+    li = tl.zeros([BLOCK_Q], dtype=tl.float32)                # running denominator 
+    o_acc = tl.zeros([BLOCK_Q, BLOCK_D], dtype=tl.float32)   # running output accumulator
 
     q_ptr = tl.load(q_block_ptr, boundary_check=(0, 1))
 
@@ -83,8 +80,8 @@ def self_attn_fwd(
         mi = new_mi
         li = li * alpha + tl.sum(p, axis=1) # 1d
 
-        k_ptr = tl.advance(k_ptr, (0, BLOCK_KV))
-        v_ptr = tl.advance(v_ptr, (BLOCK_KV, 0))
+        k_block_ptr = tl.advance(k_block_ptr, (0, BLOCK_KV))
+        v_block_ptr = tl.advance(v_block_ptr, (BLOCK_KV, 0))
 
     o_acc = o_acc / li[:, None]
 
@@ -193,7 +190,7 @@ arg will be 0 since we will be streaming through them in the loop.
 
 So to summarize:
 
-- BLOCK_Q = 4, BLOCK_D = 4
+- BLOCK_Q = 4, BLOCK_D = 4, BLOCK_KV = 4
 - stride_q_h = 32
 - Q, K, V has shape (2, 2, 8, 4) where 2 is bs, 2 is no of heads, 8 is seq len, 4 is head dim
 - Grid is launched as (N/BLOCK_Q, 2*2) = (2, 4)
@@ -206,4 +203,44 @@ So to summarize:
     - shape is (N, BLOCK_D) = (8, 4)
     - offsets is (block_row*BLOCK_Q, 0)
     - block_shape is (BLOCK_Q, BLOCK_D) = (4, 4)
+ - K_block (note we loaded it transposed):
+   - base is K+offset
+   - shape is (BLOCK_D, N) = (4, 8)
+   - offsets is (0, 0)
+   - block_shape is (BLOCK_D, BLOCK_KV) = (4, 4)
+ - V_block:
+   - base is V+offset
+   - shape is (N, BLOCK_D) = (8, 4)
+   - offsets is (0, 0)
+   - block_shape is (BLOCK_KV, BLOCK_D) = (4, 4)
+
+Taking block 0 as example, and assuming Q, K, V are the same tensor, it is loading into SRAM
+
+    [0.3581, 0.1616, 0.5714, 0.4795]
+    [0.5468, 0.3008, 0.9154, 0.3457]
+    [0.4201, 0.1406, 0.2273, 0.5269]
+    [0.1441, 0.1024, 0.8580, 0.8310]
+
+Now K.T looks like this
+
+    [0.3726, 0.2675, 0.6271, 0.0074, 0.7765, 0.4731, 0.5758, 0.5959]
+    [0.9796, 0.5407, 0.0052, 0.7666, 0.0496, 0.4861, 0.4594, 0.3132]
+    [0.9050, 0.2445, 0.9567, 0.0332, 0.0430, 0.3592, 0.2487, 0.9765]
+    [0.7481, 0.3501, 0.0109, 0.0422, 0.3608, 0.8837, 0.6314, 0.7293]
+
+So we load (4, 4) block
+    [0.3726, 0.2675, 0.6271, 0.0074]
+    [0.9796, 0.5407, 0.0052, 0.7666]
+    [0.9050, 0.2445, 0.9567, 0.0332]
+    [0.7481, 0.3501, 0.0109, 0.0422]
+
+and perform dot product between q block and k block. After that, we do online softmax and dot product with V.
+
+    [0.3581, 0.1616, 0.5714, 0.4795]
+    [0.5468, 0.3008, 0.9154, 0.3457]
+    [0.4201, 0.1406, 0.2273, 0.5269]
+    [0.1441, 0.1024, 0.8580, 0.8310]
+
+next iteration, we advance k block right and advance v block down.
+
 """
