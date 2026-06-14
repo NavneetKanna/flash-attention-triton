@@ -133,6 +133,7 @@ def flash_attention(q, k, v):
     return o
 
 if __name__ == "__main__":
+    assert torch.cuda.is_available(), "needs a CUDA GPU + Triton"
     torch.manual_seed(0)
     B, H, N, D = 2, 4, 256, 64
     q = torch.randn(B, H, N, D, device="cuda", dtype=torch.float32)
