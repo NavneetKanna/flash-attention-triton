@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 import triton
 import triton.language as tl
@@ -8,12 +9,24 @@ from triton.runtime import driver
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 @triton.jit
+def apply_rope_triton(x, cos, sin):
+    # x, cos, sin: [ROWS, BLOCK_D] with head-dim on the last axis
+    BLOCK_D: tl.constexpr = x.shape[1]
+    x1 = x[:, : BLOCK_D // 2]
+    x2 = x[:, BLOCK_D // 2 :]
+    x_rot = tl.cat([-x2, x1], axis=1)
+    return x * cos + x_rot * sin
+
+@triton.jit
 def self_attn_fwd(
     Q, K, V, O, # (B, H, N, D)
+    Cos, Sin,
     stride_q_b, stride_q_h, stride_q_n, stride_q_d,
     stride_k_b, stride_k_h, stride_k_n, stride_k_d,
     stride_v_b, stride_v_h, stride_v_n, stride_v_d,
     stride_o_b, stride_o_h, stride_o_n, stride_o_d,
+    stride_cos_n, stride_cos_d,
+    stride_sin_n, stride_sin_d,
     scale,
     B, H, N, D,
     BLOCK_Q: tl.constexpr,
@@ -35,6 +48,8 @@ def self_attn_fwd(
         order=(1, 0) # row major
     )
 
+    q_ptr = tl.load(q_block_ptr, boundary_check=(0, 1))
+
     # the shape is transposed
     k_block_ptr = tl.make_block_ptr(
         base=K+offset,
@@ -54,6 +69,28 @@ def self_attn_fwd(
         order=(1, 0) # row major
     )
 
+    cos_q_block_ptr = tl.make_block_ptr(
+        base=Cos,
+        shape=(N, BLOCK_D),
+        strides=(stride_cos_n, stride_cos_d),
+        offsets=(block_row * BLOCK_Q, 0),
+        block_shape=(BLOCK_Q, BLOCK_D),
+        order=(1, 0),
+    )
+
+    sin_q_block_ptr = tl.make_block_ptr(
+        base=Sin,
+        shape=(N, BLOCK_D),
+        strides=(stride_sin_n, stride_sin_d),
+        offsets=(block_row * BLOCK_Q, 0),
+        block_shape=(BLOCK_Q, BLOCK_D),
+        order=(1, 0),
+    )
+
+    cos_q = tl.load(cos_q_block_ptr, boundary_check=(0, 1))
+    sin_q = tl.load(sin_q_block_ptr, boundary_check=(0, 1))
+    q_ptr = apply_rope_triton(q_ptr, cos_q, sin_q)
+
     # variables for online softmax
     # these need to be 1D since we process in batch 
     # they apply across the rows of the block
@@ -61,7 +98,6 @@ def self_attn_fwd(
     li = tl.zeros([BLOCK_Q], dtype=tl.float32)                # running denominator 
     o_acc = tl.zeros([BLOCK_Q, BLOCK_D], dtype=tl.float32)   # running output accumulator
 
-    q_ptr = tl.load(q_block_ptr, boundary_check=(0, 1))
 
     q_idx = block_row * BLOCK_Q + tl.arange(0, BLOCK_Q)
 
@@ -71,11 +107,22 @@ def self_attn_fwd(
         k_ptr = tl.load(k_block_ptr, boundary_check=(0, 1))
         v_ptr = tl.load(v_block_ptr, boundary_check=(0, 1))
 
+        k_idx = start_kv + tl.arange(0, BLOCK_KV)
+
+        k_ptr_T = k_ptr.trans(1, 0) # [BLOCK_KV, BLOCK_D]
+
+        cos_k = tl.load(Cos + k_idx[:, None] * stride_cos_n +
+                        tl.arange(0, BLOCK_D)[None, :] * stride_cos_d)
+        sin_k = tl.load(Sin + k_idx[:, None] * stride_sin_n +
+                        tl.arange(0, BLOCK_D)[None, :] * stride_sin_d)
+
+        k_ptr_T = apply_rope_triton(k_ptr_T, cos_k, sin_k)
+        k_ptr = k_ptr_T.trans(1, 0) # back to [BLOCK_D, BLOCK_KV]
+
         # Q @ K.T
         qk = tl.dot(q_ptr, k_ptr) * qk_scale
 
         # Causal
-        k_idx = start_kv + tl.arange(0, BLOCK_KV)
         # For all the query indicies >= key indicies, keep the value, others mask it out 
         # so basically, mask out the upper triangle and keep the lower triangle
         qk = tl.where(q_idx[:, None] >= k_idx[None, :], qk, float('-inf'))
@@ -106,7 +153,7 @@ def self_attn_fwd(
     )
     tl.store(o_block_ptr, o_acc, boundary_check=(0, 1))
 
-def flash_attention(q, k, v):
+def flash_attention(q, k, v, cos, sin):
     B, H, N, D = q.shape
     assert q.shape == k.shape == v.shape
 
@@ -121,14 +168,32 @@ def flash_attention(q, k, v):
 
     self_attn_fwd[grid](
         q, k, v, o,
+        cos, sin,
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),
         k.stride(0), k.stride(1), k.stride(2), k.stride(3),
         v.stride(0), v.stride(1), v.stride(2), v.stride(3),
         o.stride(0), o.stride(1), o.stride(2), o.stride(3),
+        cos.stride(0), cos.stride(1),
+        sin.stride(0), sin.stride(1),
         scale, B, H, N, D,
         BLOCK_Q=BLOCK_Q, BLOCK_KV=BLOCK_KV, BLOCK_D=D
     )
     return o
+
+def precompute_rope(D, N, base=10000.0, device="cuda", dtype=torch.float32):
+    inv_freq = 1.0 / (base ** (torch.arange(0, D, 2, device=device).float() / D))
+    t = torch.arange(N, device=device).float()
+    freqs = torch.outer(t, inv_freq)
+    emb = torch.cat([freqs, freqs], dim=-1)
+    return emb.cos().to(dtype), emb.sin().to(dtype) # each (N, D)
+
+def rotate_half(x):
+    h = x.shape[-1] // 2
+    return torch.cat([-x[..., h:], x[..., :h]], dim=-1)
+
+
+def apply_rope(x, cos, sin):                          # x:(B,H,N,D), cos/sin:(N,D)
+    return x * cos + rotate_half(x) * sin
 
 if __name__ == "__main__":
     torch.manual_seed(0)
@@ -137,10 +202,16 @@ if __name__ == "__main__":
     k = torch.randn(B, H, N, D, device="cuda", dtype=torch.float32)
     v = torch.randn(B, H, N, D, device="cuda", dtype=torch.float32)
 
-    out = flash_attention(q, k, v)
-    ref = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+    cos, sin = precompute_rope(D, N, device="cuda")
+
+    out = flash_attention(q, k, v, cos, sin)
+
+    qr = apply_rope(q, cos, sin)
+    kr = apply_rope(k, cos, sin)
+    ref = F.scaled_dot_product_attention(qr, kr, v, is_causal=True)
+
     torch.testing.assert_close(out, ref, atol=1e-2, rtol=0)
-    print(f"passed  (max diff {(out - ref).abs().max().item():.2e})")
+    print(f"passed (max diff {(out - ref).abs().max().item():.2e})")
 
 """
 
