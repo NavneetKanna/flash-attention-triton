@@ -1,3 +1,5 @@
+import argparse
+
 import torch
 import torch.nn.functional as F
 
@@ -88,7 +90,7 @@ def self_attn_fwd(
         p = tl.math.exp2(qk - new_mi[:, None]) # 2d
 
         # Matmul with V
-        o_acc = o_acc * alpha[:, None] + tl.dot(p, v_ptr)
+        o_acc = o_acc * alpha[:, None] + tl.dot(p.to(v_ptr.dtype), v_ptr)
 
         mi = new_mi
         li = li * alpha + tl.sum(p, axis=1) # 1d
@@ -106,7 +108,7 @@ def self_attn_fwd(
         block_shape=(BLOCK_Q, BLOCK_D),
         order=(1, 0) # row major
     )
-    tl.store(o_block_ptr, o_acc, boundary_check=(0, 1))
+    tl.store(o_block_ptr, o_acc.to(O.dtype.element_ty), boundary_check=(0, 1))
 
 def flash_attention(q, k, v):
     B, H, N, D = q.shape
@@ -134,18 +136,25 @@ def flash_attention(q, k, v):
 
 if __name__ == "__main__":
     assert torch.cuda.is_available(), "needs a CUDA GPU + Triton"
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dtype", choices=["fp16", "bf16", "fp32"], default="fp16")
+    args = parser.parse_args()
+    dt = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[args.dtype]
+    atol = {"fp16": 2e-2, "bf16": 3e-2, "fp32": 1e-2}[args.dtype]
+
     torch.manual_seed(0)
     B, H, N, D = 2, 4, 256, 64
-    q = torch.randn(B, H, N, D, device="cuda", dtype=torch.float32)
-    k = torch.randn(B, H, N, D, device="cuda", dtype=torch.float32)
-    v = torch.randn(B, H, N, D, device="cuda", dtype=torch.float32)
+    q = torch.randn(B, H, N, D, device="cuda", dtype=dt)
+    k = torch.randn(B, H, N, D, device="cuda", dtype=dt)
+    v = torch.randn(B, H, N, D, device="cuda", dtype=dt)
 
     out = flash_attention(q, k, v)
 
     ref = F.scaled_dot_product_attention(q, k, v, is_causal=True)
 
-    torch.testing.assert_close(out, ref, atol=1e-2, rtol=0)
-    print(f"passed (max diff {(out - ref).abs().max().item():.2e})")
+    torch.testing.assert_close(out, ref, atol=atol, rtol=0)
+    print(f"[{args.dtype}] passed (max diff {(out - ref).abs().max().item():.2e})")
 
 """
 
