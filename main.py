@@ -78,7 +78,7 @@ def self_attn_fwd(
         k_idx = start_kv + tl.arange(0, BLOCK_KV)
         # For all the query indicies >= key indicies, keep the value, others mask it out 
         # so basically, mask out the upper triangle and keep the lower triangle
-        qk = tl.where(q_idx[:, None] >= k_idx[:, None], qk, float('-inf'))
+        qk = tl.where(q_idx[:, None] >= k_idx[None, :], qk, float('-inf'))
 
         # Online softmax
         new_mi = tl.maximum(mi, tl.max(qk, axis=1)) # 1d
@@ -138,7 +138,7 @@ if __name__ == "__main__":
     v = torch.randn(B, H, N, D, device="cuda", dtype=torch.float32)
 
     out = flash_attention(q, k, v)
-    ref = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+    ref = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
     torch.testing.assert_close(out, ref, atol=1e-2, rtol=0)
     print(f"passed  (max diff {(out - ref).abs().max().item():.2e})")
 
