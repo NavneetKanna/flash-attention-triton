@@ -1,3 +1,7 @@
+"""
+This repo was useful - https://github.com/kyegomez/FlashAttention20Triton
+"""
+
 import argparse
 
 import torch
