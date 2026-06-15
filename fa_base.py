@@ -74,7 +74,9 @@ def self_attn_fwd(
 
     qk_scale = scale * 1.44269504089
 
-    for start_kv in range(0, N, BLOCK_KV):
+    kv_end = (block_row + 1) * BLOCK_Q
+
+    for start_kv in range(0, kv_end, BLOCK_KV):
         k_ptr = tl.load(k_block_ptr, boundary_check=(0, 1))
         v_ptr = tl.load(v_block_ptr, boundary_check=(0, 1))
 

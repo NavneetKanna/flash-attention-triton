@@ -117,7 +117,9 @@ def self_attn_fwd(
         order=(1, 0)
     )
 
-    for start_kv in range(0, N, BLOCK_KV):
+    kv_end = (block_row + 1) * BLOCK_Q
+
+    for start_kv in range(0, kv_end, BLOCK_KV):
         k1 = tl.load(k1_ptr, boundary_check=(0, 1)) # (BLOCK_KV, HALF)
         k2 = tl.load(k2_ptr, boundary_check=(0, 1))
         v_ptr = tl.load(v_block_ptr, boundary_check=(0, 1)) # (BLOCK_KV, BLOCK_D)
