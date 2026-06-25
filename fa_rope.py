@@ -172,8 +172,8 @@ def flash_attention(q, k, v, cos, sin):
     assert cos.shape == (N, D) and sin.shape == (N, D), "cos/sin must be (N, D)"
     assert D % 2 == 0, "The last dim of Q, K, V needs to be divisble by 2"
 
-    BLOCK_Q = 32
-    BLOCK_KV = 32
+    BLOCK_Q = 64
+    BLOCK_KV = 64
     assert N % BLOCK_Q == 0 and N % BLOCK_KV == 0
     assert D % 2 == 0
 
