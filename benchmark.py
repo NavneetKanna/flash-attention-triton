@@ -20,6 +20,9 @@ try:
 except Exception:
     HAS_FA = False
 
+import os
+os.makedirs("assets", exist_ok=True)
+
 DTYPES = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}
 ATOL = {"fp16": 2e-2, "bf16": 3e-2, "fp32": 1e-2}
 
@@ -154,8 +157,11 @@ def run(args):
         ax.plot(xs2, ys2, marker="o", label=c)
     ax.set_xscale("log", base=2); ax.set_yscale("log")
     ax.set_xlabel("sequence length"); ax.set_ylabel("runtime (ms)")
-    ax.set_title(f"Causal attention forward, {args.dtype}"); ax.legend(); ax.grid(True, alpha=.3)
-    fig.tight_layout(); fig.savefig("runtime_vs_seqlen.png", dpi=150)
+    ax.set_title(f"Causal attention forward, {args.dtype}")
+    ax.legend()
+    ax.grid(True, alpha=.3)
+    fig.tight_layout()
+    fig.savefig("assets/runtime_vs_seqlen.png", dpi=150)
 
     fig, ax = plt.subplots(figsize=(7, 5))
     for c in cols:
@@ -165,9 +171,13 @@ def run(args):
         ys2 = [y for y in ys if y is not None]
         ax.plot(xs2, ys2, marker="o", label=c)
     ax.set_xscale("log", base=2)
-    ax.set_xlabel("sequence length"); ax.set_ylabel("achieved TFLOP/s")
-    ax.set_title(f"Causal attention forward, {args.dtype}"); ax.legend(); ax.grid(True, alpha=.3)
-    fig.tight_layout(); fig.savefig("tflops_vs_seqlen.png", dpi=150)
+    ax.set_xlabel("sequence length")
+    ax.set_ylabel("achieved TFLOP/s")
+    ax.set_title(f"Causal attention forward, {args.dtype}")
+    ax.legend()
+    ax.grid(True, alpha=.3)
+    fig.tight_layout()
+    fig.savefig("assets/tflops_vs_seqlen.png", dpi=150)
 
     # RoPE runtime plot. The clean fusion comparison holds the attention
     # engine fixed (our kernel) and varies only WHERE RoPE happens, so the
@@ -184,13 +194,17 @@ def run(args):
     ax.plot(xs, out_tri, marker="o", label="rotate-outside + our kernel")
     ax.plot(xs, out_sdpa, marker="o", alpha=0.45,
             label="rotate-outside + SDPA (FA2 ref.)")
-    ax.set_xscale("log", base=2); ax.set_yscale("log")
-    ax.set_xlabel("sequence length"); ax.set_ylabel("runtime (ms)")
+    ax.set_xscale("log", base=2)
+    ax.set_yscale("log")
+    ax.set_xlabel("sequence length")
+    ax.set_ylabel("runtime (ms)")
     ax.set_title(f"RoPE + causal attention forward, {args.dtype}")
-    ax.legend(); ax.grid(True, alpha=.3)
-    fig.tight_layout(); fig.savefig("rope_runtime_vs_seqlen.png", dpi=150)
+    ax.legend()
+    ax.grid(True, alpha=.3)
+    fig.tight_layout()
+    fig.savefig("assets/rope_runtime_vs_seqlen.png", dpi=150)
 
-    print("\nsaved runtime_vs_seqlen.png, tflops_vs_seqlen.png, rope_runtime_vs_seqlen.png")
+    print("\nsaved runtime_vs_seqlen.png, tflops_vs_seqlen.png, rope_runtime_vs_seqlen.png in assets/")
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
